@@ -1,18 +1,38 @@
 #include <stdio.h>
 #include <string.h>
-#include <math.h>
-#include <stdlib.h>
 #include <unistd.h>
-#include <sys/sysinfo.h>
-#include <sys/utsname.h>
-#include <sys/resource.h>
-#include <sys/types.h>
-#include <utmp.h>
+#include <stdlib.h>
+#include <signal.h>
+#include "getStats.h"
+
+#define MEM_USAGE_INDEX 0
+#define CPU_USAGE_INDEX 1
+#define USER_INFO_INDEX 2
+#define SYSTEM_INFO_INDEX 3
+#define PARENT_INDEX 4
+
+void handler(int code) {
+    if (code == SIGTSTP) return;
+    if (code == SIGINT) {
+        printf("Would you like to quit the program? (Y/N)\n");
+        char c[100];
+        scanf("%s", c);
+        while (strcmp("Y", c) != 0 && strcmp("N", c) != 0) {
+            printf("Undefined character received. Would you like to quit the program? (Y/N)\n");
+            scanf("%s", c);
+        }
+        if (strcmp("Y", c) == 0) {
+            exit(SIGINT);
+        }
+        printf("N received. Continuing program execution...\n");
+    }
+    return;
+}
 
 // Prints the dashes that separate each category of System monitor.
 
 void print_dashes() {
-    printf("---------------------------------------PID: %ld\n", (long)getpid());
+    printf("---------------------------------------\n");
 }
 
 // Prints the header at the top of the program.
@@ -30,33 +50,33 @@ void print_header_sequential(int num_samples, int t_delay) {
 
 // Prints the memory usage of the program.
 
-void print_ram_usage() {
-    struct rusage ram_usage;
-    if (getrusage(RUSAGE_SELF, &ram_usage) < 0) {
-        fprintf(stderr, "Error opening ram usage file, returning.");
-        return;
+void print_ram_usage(int pipefd[4][2]) {
+    long ram_usage = get_ram_usage();
+    long new;
+    for (int i = 0; i < 4; i++) {
+        if (read(pipefd[i][0], &new, sizeof(long)) < 0) {
+            fprintf(stderr, "unable to read ram usage of index %d", i);
+        }
+        ram_usage = ram_usage + new;
     }
-    printf(" Memory usage: %ld kilobytes\n", ram_usage.ru_maxrss);
+    printf(" Memory usage: %ld kilobytes\n", ram_usage);
     print_dashes();
     return;
 }
 
 // Prints the memory usage of the system.
 
-void print_memory_usage(float *mem_usage_history, float *vmem_usage_history, int sample_index, int samples, int graphics, int sequential) {
-    struct sysinfo sysinfoData;
-    if (sysinfo(&sysinfoData) < 0) {
-        fprintf(stderr, "program failed when attempting to create sysinfo struct, returning.");
+void print_memory_usage(float *mem_usage_history, float *vmem_usage_history, int sample_index, int samples, int graphics, int sequential, int pipefd) {
+    Memory memory;
+    if (read(pipefd, &memory, sizeof(Memory)) < 0) {
+        fprintf(stderr, "cannot read RAM usage\n");
         return;
     }
     printf("### Memory ### (Phys.Used/Tot -- Virtual Used/Tot)\n");
-    float total_ram = sysinfoData.totalram/pow(1024,3);
-    float total_vram = total_ram + sysinfoData.totalswap/pow(1024, 3);
-    float phys_ram = sysinfoData.totalram/pow(1024,3) - sysinfoData.freeram/pow(1024,3);
-    float swap_used = sysinfoData.totalswap - sysinfoData.freeswap;
-    float virtual_ram = phys_ram + swap_used/pow(1024,3);
-    mem_usage_history[sample_index] = phys_ram;
-    vmem_usage_history[sample_index] = virtual_ram;
+    mem_usage_history[sample_index] = memory.physical_ram;
+    vmem_usage_history[sample_index] = memory.virtual_ram;
+    float total_ram = memory.total_ram;
+    float total_vram = memory.total_virtual;
     if (sequential == 0) {
         for (int i = 0; i < sample_index; i++) {
             printf("%.2f GB / %.2f GB -- %.2f GB / %.2f GB", mem_usage_history[i], total_ram, vmem_usage_history[i], total_vram);
@@ -89,12 +109,12 @@ void print_memory_usage(float *mem_usage_history, float *vmem_usage_history, int
         }
         printf ("   |");
         if (difference > 0) {
-            for (int bar = 0; bar < (int) (difference * 100); bar++){
+            for (int bar = 0; bar < (int) (difference * 10); bar++){
                 printf("#");
             }
         }
         if (difference < 0) {
-            for (int bar = 0; bar < (int) -(difference * 100); bar++) {
+            for (int bar = 0; bar < (int) -(difference * 10); bar++) {
                 printf(":");
             }
         }
@@ -112,45 +132,50 @@ void print_memory_usage(float *mem_usage_history, float *vmem_usage_history, int
 
 // Prints system CPU information, number of cores and total cpu usage
 
-void print_cpu_info(float *cpu_usage_history, int sample_index, int num_samples, int graphics, int sequential) {
-    FILE *fp = fopen("/proc/stat", "r");
-    if (fp == NULL) {
-        fprintf(stderr, "Error opening /proc/stat, returning.");
+void print_cpu_info(float *cpu_usage_history, float *cpu_total_history, float *cpu_percentage_history, int sample_index, int num_samples, int graphics, int sequential, int pipefd) {
+
+    Processor cpu;
+
+    if (read(pipefd, &cpu, sizeof(Processor)) < 0) {
+        fprintf(stderr, "unable to read cpu info\n");
         return;
     }
-    char cpu[10];
-    long user, nice, system, idle, iowait, irq, softirq, a, b, c;
-    fscanf(fp, "%s %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld", cpu, &user, &nice, &system, &idle, &iowait, &irq, &softirq, &a, &b, &c);
-    float cpu_usage = (float) 100 * ((float) (user + nice + system + iowait + irq + softirq + a + b + c) / (float) (user + nice + system + idle + iowait + irq + softirq + a + b + c));
-    fscanf(fp, "%s %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld", cpu, &user, &nice, &system, &idle, &iowait, &irq, &softirq, &a, &b, &c);
-    int cpu_count = 0;
-    while (strncmp(cpu, "cpu", 3) == 0) {
-        cpu_count++;
-        fscanf(fp, "%s  %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld", cpu, &user, &nice, &system, &idle, &iowait, &irq, &softirq, &a, &b, &c);
+    
+    cpu_usage_history[sample_index] = cpu.cpu_usage;
+    cpu_total_history[sample_index] = cpu.cpu_total;
+
+    float percentage;
+
+    if (sample_index == 0) {
+        percentage = 100 * (0);
     }
-    if (fclose(fp)) {perror("fclose cpu info");}
+    else {
+        percentage = 100 * ((cpu_usage_history[sample_index] - cpu_usage_history[sample_index - 1]) /(cpu_total_history[sample_index] - cpu_total_history[sample_index - 1]));
+    }
 
-    cpu_usage_history[sample_index] = cpu_usage;
+    printf("Number of cores: %d\n", cpu.cpu_count);
+    printf(" total cpu use = %.2f%%\n", percentage);
 
-    printf("Number of cores: %d\n", cpu_count);
-    printf(" total cpu use = %.2f%%\n", cpu_usage_history[sample_index]);
-
+    cpu_percentage_history[sample_index] = percentage;
+    int num_prints;
     if (graphics == 1) {
         if (sequential == 1) {
+            num_prints = percentage / 10;
             printf("     ");
-            for (int i = 0; i < (int)cpu_usage_history[sample_index]; i++) {
+            for (int i = 0; i < num_prints; i++) {
                 printf("|");
             }
-            printf(" %.2f\n", cpu_usage_history[sample_index]);
+            printf(" %.2f%%\n", percentage);
             print_dashes();
             return;
         }
         for (int j = 0; j < sample_index + 1; j++) {
             printf("     ");
-            for (int i = 0; i < (int)cpu_usage_history[j]; i++) {
+            num_prints = cpu_percentage_history[j] / 10;
+            for (int i = 0; i < num_prints; i++) {
                 printf("|");
             }
-            printf(" %.2f\n", cpu_usage_history[j]);
+            printf(" %.2f%%\n", cpu_percentage_history[j]);
         }
         for (int j = sample_index + 1; j < num_samples; j++) {
             printf("\n");
@@ -163,16 +188,16 @@ void print_cpu_info(float *cpu_usage_history, int sample_index, int num_samples,
 
 // Prints the information on current users on the system.
 
-void print_user_info() {
+void print_user_info(int pipefd) {
     printf("### Sessions/users ###\n");
-    struct utmp *user;
-    setutent();
-    user = getutent();
-    while (user != NULL) {
-        if (user -> ut_type == USER_PROCESS) {
-            printf(" %s       %s (%s)\n", user -> ut_name, user -> ut_line, user -> ut_host);
-        }
-        user = getutent();
+    struct utmp user;
+    int status;
+    while ((status = read(pipefd, &user, sizeof(struct utmp))) > 0) {
+        printf(" %s       %s (%s)\n", user.ut_name, user.ut_line, user.ut_host);
+    }
+    if (status < 0) {
+        fprintf(stderr, "Error when reading from user info pipe\n");
+        return;
     }
     print_dashes();
     return;
@@ -180,10 +205,10 @@ void print_user_info() {
 
 // Prints the system information category.
 
-void print_sysinfo() {
+void print_sysinfo(int pipefd) {
     struct utsname sysinfo;
-    if (uname(&sysinfo) < 0) {
-        fprintf(stderr, "program failed when attempting to create uname struct, returning.");
+    if (read(pipefd, &sysinfo, sizeof(struct utsname)) < 1) {
+        fprintf(stderr, "cannot read from struct utsname\n");
         return;
     }
     printf("### System Information ###\n");
@@ -199,6 +224,17 @@ void print_sysinfo() {
 // Main function from which the program is run.
 
 int main(int argc, char **argv) {
+
+    // Signal handler
+    struct sigaction action;
+    action.sa_handler = handler;
+    action.sa_flags = 0;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGINT, &action, NULL);
+    sigaction(SIGTSTP, &action, NULL);
+
+    // Parent pid
+    int parent_pid = (int)getpid();
  
     // Setting output mode based on command line arguments
 
@@ -261,52 +297,124 @@ int main(int argc, char **argv) {
     // Create arrays to keep history of memory, cpu usage
 
     float cpu_usage_history[samples];
+    float cpu_total_history[samples];
     float mem_usage_history[samples];
     float vmem_usage_history[samples];
+    float cpu_percentage_history[samples];
 
     // Print output
 
-    printf("\e[1;1H\e[2J"); // escape code for clearing terminal
+    for (int sample_index = 0; sample_index < samples; sample_index++) {
 
-    // Print when sequential == 0 (not flagged)
+        // initialize process id's, pipe file descriptors for tracing
 
-    if (sequential == 0) {
+        int pipefd[4][2];
+        int rusage_pipe[4][2];
+        int pid[] = {0, 0, 0, 0, 0};
 
-        for (int sample_index = 0; sample_index < samples; sample_index++) {
-            print_header_nonsequential(sample_index, samples, tdelay); // Prints header, which indicates # samples and tdelay
-            print_ram_usage(); // Prints allocated ram for program
-            if (system == 1 || user == 0) {
-                print_memory_usage(mem_usage_history, vmem_usage_history, sample_index, samples, graphics, sequential);
-                print_cpu_info(cpu_usage_history, sample_index, samples, graphics, sequential);
+        // initializing pipes
+        for (int i = 0; i < 4; i++) {
+            if (pipe(pipefd[i]) < 0) {
+                fprintf(stderr, "error occurred initializing pipe at index: %d\n", i);
+                return -1;
             }
-            if (user == 1 || system == 0) {print_user_info();}
-            print_sysinfo();
+            if (pipe(rusage_pipe[i]) < 0) {
+                fprintf(stderr, "error occurred initializing pipe at index: %d\n", i);
+                return -1;
+            }
+        }
 
-            // Printing of samples completed, waiting before refreshing and printing new sample
+        // initializing forks
+        for (int i = 0; i < 4; i++) {
+            if (getpid() == parent_pid) {
+                if ((pid[i] = fork()) < 0) {
+                    fprintf(stderr, "error when forking at index: %d\n", i);
+                    return -1;
+                }
+            }
+        }
 
-            if (sample_index != samples - 1) {
-                sleep(tdelay);
-                printf("\e[1;1H\e[2J");
+        // detecting which child process is currently on, and closing irrelevant fd's
+        int process_index = 0;
+        while (pid[process_index] != 0) {
+            process_index++;
+        }
+
+        // child processes closing all reading pipes, and writing pipe not equal to the current process
+        if (process_index != PARENT_INDEX) {
+            for (int i = 0; i < 4; i++) {
+                close(pipefd[i][0]);
+                close(rusage_pipe[i][0]);
+                if (i != process_index) {
+                    close(pipefd[i][1]);
+                    close(rusage_pipe[i][1]);
+                }
+            }
+        }
+
+        // parent close pipes
+        if (process_index == PARENT_INDEX) for (int i = 0; i < 4; i++) {
+            close(pipefd[i][1]);
+            close(rusage_pipe[i][1]);
+        }
+
+        if (process_index == USER_INFO_INDEX) {
+            pipe_ram_usage(rusage_pipe[USER_INFO_INDEX][1]);
+            pipe_user_info(pipefd[USER_INFO_INDEX][1]);
+            if (close(pipefd[USER_INFO_INDEX][1]) < 0) {
+                fprintf(stderr, "[%d]: cannot close pipe file descriptor, for process: %d\n", getpid(), process_index);
+                exit(EXIT_FAILURE);
+            }
+            exit(EXIT_SUCCESS);
+        }
+
+        if (process_index == MEM_USAGE_INDEX) {
+            pipe_ram_usage(rusage_pipe[MEM_USAGE_INDEX][1]);
+            pipe_memory_usage(pipefd[MEM_USAGE_INDEX][1]);
+            if (close(pipefd[MEM_USAGE_INDEX][1]) < 0) {
+                fprintf(stderr, "[%d]: cannot close pipe file descriptor, for process: %d\n", getpid(), process_index);
+                exit(EXIT_FAILURE);
+            }
+            exit(EXIT_SUCCESS);
+        }
+
+        if (process_index == CPU_USAGE_INDEX) {
+            pipe_ram_usage(rusage_pipe[CPU_USAGE_INDEX][1]);
+            pipe_cpu_info(pipefd[CPU_USAGE_INDEX][1]);
+            if (close(pipefd[CPU_USAGE_INDEX][1]) < 0) {
+                fprintf(stderr, "[%d]: cannot close pipe file descriptor, for process: %d\n", getpid(), process_index);
+                exit(EXIT_FAILURE);
+            }
+            exit(EXIT_SUCCESS);
+        }
+
+        if (process_index == SYSTEM_INFO_INDEX) {
+            pipe_ram_usage(rusage_pipe[SYSTEM_INFO_INDEX][1]);
+            pipe_sysinfo(pipefd[SYSTEM_INFO_INDEX][1]);
+            if (close(pipefd[SYSTEM_INFO_INDEX][1]) < 0) {
+                fprintf(stderr, "[%d]: cannot close pipe file descriptor, for process: %d\n", getpid(), process_index);
+                exit(EXIT_FAILURE);
+            }
+            exit(EXIT_SUCCESS);
+        }
+
+        if (process_index == PARENT_INDEX) {
+            if (sequential == 0 || sample_index == 0) printf("\e[1;1H\e[2J"); // escape code for clearing terminal
+            // communicate to children to ping system
+            if (sequential == 0) print_header_nonsequential(sample_index, samples, tdelay);
+            else print_header_sequential(samples, tdelay);
+            print_ram_usage(rusage_pipe);
+            if (system == 1 || user == 0) print_memory_usage(mem_usage_history, vmem_usage_history, sample_index, samples, graphics, sequential, pipefd[MEM_USAGE_INDEX][0]);
+            if (user == 1 || system == 0) print_user_info(pipefd[USER_INFO_INDEX][0]);
+            if (system == 1 || user == 0) print_cpu_info(cpu_usage_history, cpu_total_history, cpu_percentage_history, sample_index, samples, graphics, sequential, pipefd[CPU_USAGE_INDEX][0]);
+            print_sysinfo(pipefd[SYSTEM_INFO_INDEX][0]);
+        }
+
+        if (sample_index != samples - 1) {
+            for (int t = 0; t < tdelay; t++) {
+                sleep(1);
             }
         }
     }
-
-    // Print when sequential == 1 (flagged)
-    /* Designed such that header will be printed, then memory, cpu usage at each ping will
-    be printed out sequentially (with no spaces), before finishing with printing user data
-    and system information. */
-
-    if (sequential == 1) {
-        print_header_sequential(samples, tdelay);
-        print_ram_usage();
-        for (int sample_index = 0; sample_index < samples && (system == 1 || user == 0); sample_index++) {
-            print_memory_usage(mem_usage_history, vmem_usage_history, sample_index, samples, graphics, sequential);
-            print_cpu_info(cpu_usage_history, sample_index, samples, graphics, sequential);
-            sleep(tdelay);
-        }
-        if (user == 1 || system == 0) {print_user_info();}
-        print_sysinfo();
-    }
-
     return 0;
 }
