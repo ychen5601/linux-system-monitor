@@ -1,7 +1,5 @@
 # Makefile for CSCB09 A3 - System Monitoring Tool: Concurrency and Signals
-# Yu Yang Chen
-# cheny843
-# 1005843063
+
 
 CC = gcc
 
