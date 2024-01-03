@@ -1,10 +1,6 @@
 ### CSCB09 Assignment 3 - System Monitoring Tool: Concurrency and Signals
 
-Author: Yu Yang (Kenny) Chen
-Utorid: cheny843
-Student #: 1005843063
-Email: kennyyuyang.chen@mail.utoronto.ca
-Github: @ychen5601
+**REDACTED**
 
 By compiling and running this project in a Linux system, you will be able to print out information
 with respect to this system in real time. There are four categories of information to be printed -
